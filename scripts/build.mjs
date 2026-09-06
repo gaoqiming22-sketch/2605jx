@@ -1,10 +1,10 @@
 // ============================================================
-// scripts/build.mjs —— 生成成品
+// scripts/build.mjs —— 生成成品（基于 index.html 单源）
 //   用法： node scripts/build.mjs
 //   可选： --data 路径（默认 js/data.js） --out 目录（默认 dist）
 //   产物： dist/2605军训纪念册.html  单文件自包含（图片base64内联）
-//         dist/长图.html            1080宽纵向版（供截图，可不上传）
-//         dist/2605军训总长图.png   长图.png（发QQ群直接看）
+//         dist/长图.html            长图源页（body.jx-long，供截图）
+//         dist/2605军训总长图.png   长图.png（发QQ群直接看的备份）
 // ============================================================
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from "node:fs";
 import path from "node:path";
@@ -21,7 +21,6 @@ function argVal(name) {
 const dataPath = path.resolve(root, argVal("data") || "js/data.js");
 const outDir = path.resolve(root, argVal("out") || "dist");
 const wantPng = !args.includes("--no-png");
-
 mkdirSync(outDir, { recursive: true });
 
 /* ---------- 读取数据源 ---------- */
@@ -64,44 +63,36 @@ function cloneInlined(d) {
   return c;
 }
 const inlined = cloneInlined(data);
+// 只对“数据 JSON”做转义（它会被写进 <script>，防止用户文字里的 </script> 破坏页面）
 const jsonForScript = JSON.stringify(inlined).replace(/<\//g, "<\\/");
 
-/* ---------- 读取样式与渲染脚本 ---------- */
+/* ---------- 读取骨架/样式/脚本 ---------- */
+const indexHtml = readFileSync(path.join(root, "index.html"), "utf8");
 const css = readFileSync(path.join(root, "styles.css"), "utf8");
 const appJs = readFileSync(path.join(root, "js", "app.js"), "utf8");
-const skin = `
-  <style>${css}</style>`;
 
-function pageDoc(bodyClass) {
-  return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="color-scheme" content="light">
-<title>${(meta.title || "2605 · 军训纪").replace(/</g, "&lt;")}</title>
-${skin}
-</head>
-<body${bodyClass ? ' class="' + bodyClass + '"' : ""}>
-<main id="view"></main>
-<footer id="jxFoot" class="jx-foot"></footer>
-<script>window.JX_DATA = ${jsonForScript};</script>
-<script>${appJs}</script>
-</body>
-</html>`;
+function assemble(bodyClass) {
+  let doc = indexHtml;
+  doc = doc.replace('<link rel="stylesheet" href="styles.css">', "<style>\n" + css + "\n</style>");
+  doc = doc.replace('<script src="js/data.js"></script>', "<script>window.JX_DATA = " + jsonForScript + ";</script>");
+  doc = doc.replace('<script src="js/app.js"></script>', "<script>\n" + appJs + "\n</script>");
+  const logoUri = toDataUri(meta.logo);
+  doc = doc.replace('<link rel="icon" href="assets/logo.png">', logoUri ? '<link rel="icon" href="' + logoUri + '">' : "");
+  if (bodyClass) doc = doc.replace("<body>", '<body class="' + bodyClass + '">');
+  return doc;
 }
 
-/* ---------- 生成 1) 单文件纪念册 ---------- */
+/* ---------- 生成 1) 单文件纪念册（网页版自包含） ---------- */
 const bookPath = path.join(outDir, "2605军训纪念册.html");
-writeFileSync(bookPath, pageDoc(""), "utf8");
-console.log("✓ 已生成 " + rel(bookPath) + "（" + kb(bookPath) + " KB，单文件自包含）");
+writeFileSync(bookPath, assemble(""), "utf8");
+console.log("✓ 已生成 " + rel(bookPath) + "（" + kb(bookPath) + " KB，单文件自包含网页版）");
 
 /* ---------- 生成 2) 长图源页 ---------- */
 const longPath = path.join(outDir, "长图.html");
-writeFileSync(longPath, pageDoc("jx-long"), "utf8");
+writeFileSync(longPath, assemble("jx-long"), "utf8");
 console.log("✓ 已生成 " + rel(longPath) + "（长图源页，可不上传）");
 
-/* ---------- 生成 3) 总长图 PNG ---------- */
+/* ---------- 生成 3) 总长图 PNG（可选备份） ---------- */
 if (wantPng) {
   await makeLongPng(longPath, path.join(outDir, "2605军训总长图.png"));
 }
@@ -118,18 +109,15 @@ async function makeLongPng(longHtmlPath, pngPath) {
     const { createRequire } = await import("node:module");
     const req = createRequire(import.meta.url);
     for (const mod of ["playwright-core", "playwright"]) {
-      try { pw = req(mod); break; } catch (e) { /* 继续尝试 */ }
+      try { pw = req(mod); break; } catch (e) { /* 继续 */ }
     }
     if (!pw) {
       const home = process.env.USERPROFILE || process.env.HOME || "";
       const bundled = path.join(home, ".cache", "codex-runtimes", "codex-primary-runtime", "dependencies", "node", "node_modules", "playwright-core");
-      if (existsSync(bundled)) { pw = req(bundled); }
+      if (existsSync(bundled)) pw = req(bundled);
     }
   } catch (e) { pw = null; }
-  if (!pw) {
-    console.warn("⚠ 未找到 playwright-core，跳过总长图 PNG。可设置后重跑：node scripts/build.mjs");
-    return;
-  }
+  if (!pw) { console.warn("⚠ 未找到 playwright-core，跳过总长图 PNG。可重跑：node scripts/build.mjs"); return; }
   const chromeCands = [
     process.env.PROGRAMFILES + "\\Google\\Chrome\\Application\\chrome.exe",
     process.env["PROGRAMFILES(X86)"] + "\\Google\\Chrome\\Application\\chrome.exe",
@@ -141,19 +129,17 @@ async function makeLongPng(longHtmlPath, pngPath) {
   try {
     const browser = await pw.chromium.launch({
       executablePath: chrome, headless: true,
-      args: ["--no-sandbox", "--hide-scrollbars", "--force-color-profile=srgb", "--font-render-hinting=none"],
+      args: ["--no-sandbox", "--hide-scrollbars", "--force-color-profile=srgb"],
     });
     const page = await browser.newPage({ viewport: { width: 1080, height: 900 }, deviceScaleFactor: 1 });
     await page.goto(pathToFileURL(longHtmlPath).href, { waitUntil: "networkidle" });
-    if (page.evaluate(() => document.fonts && document.fonts.ready)) {
-      try { await page.evaluate(() => document.fonts.ready); } catch (e) { /* 忽略 */ }
-    }
+    try { await page.evaluate(() => document.fonts && document.fonts.ready); } catch (e) { /* 忽略 */ }
     await page.waitForTimeout(400);
     await page.screenshot({ path: pngPath, fullPage: true, type: "png" });
     const h = await page.evaluate(() => document.body.scrollHeight);
     await browser.close();
     console.log("✓ 已生成 " + rel(pngPath) + "（" + kb(pngPath) + " KB，宽 1080，高约 " + h + " px）");
-    if (kb(pngPath) > 10240) console.warn("⚠ 总长图超过 10MB，QQ 发送可能被压缩/受限，建议减少照片或拆分。");
+    if (kb(pngPath) > 10240) console.warn("⚠ 总长图超过 10MB，QQ 发送可能受限，建议减少照片。");
   } catch (e) {
     console.warn("⚠ 总长图生成失败：" + e.message);
   }
